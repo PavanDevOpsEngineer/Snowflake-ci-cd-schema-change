@@ -1,4 +1,4 @@
--- v1.0.2__create_test_procedure.sql--
+-- v1.0.2__create_test_procedure.sql---
 -- Creates a test stored procedure to verify CI/CD execution and creates a test table
 -- Uses <env> placeholders which are replaced by the CI workflows (dev/qa/prod)
 

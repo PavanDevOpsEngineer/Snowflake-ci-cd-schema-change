@@ -2,17 +2,20 @@ name: Develop Deploy (QA)
 
 on:
   pull_request:
+    types: [closed]
     branches:
       - 'develop'
     paths:
       - 'migrations/ddl/**'
       - 'migrations/dml/**'
+  workflow_dispatch: {}
 concurrency:
   group: deploy-qa
   cancel-in-progress: false
 
 jobs:
   deploy:
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     environment: qa
     steps:
