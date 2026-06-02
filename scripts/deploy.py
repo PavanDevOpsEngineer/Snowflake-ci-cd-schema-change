@@ -64,7 +64,7 @@ def gather_migrations(kind):
     return files
 
 
-def apply_file(cursor, path, dry_run=False):
+def apply_file(cursor, path, dry_run=False, atomic_override=False):
     print(f'-- Applying: {path}')
     with open(path, 'r') as f:
         sql = f.read()
@@ -74,10 +74,27 @@ def apply_file(cursor, path, dry_run=False):
         for s in stmts:
             print(s)
         return
-    for s in stmts:
-        if not s.strip():
-            continue
-        cursor.execute(s)
+    # If file contains only DML statements, attempt to run atomically
+    # If atomic_override is True, attempt to run the whole file atomically regardless
+    if stmts and (atomic_override or is_dml_only(stmts)):
+        try:
+            cursor.execute('BEGIN')
+            for s in stmts:
+                if not s.strip():
+                    continue
+                cursor.execute(s)
+            cursor.execute('COMMIT')
+        except Exception:
+            try:
+                cursor.execute('ROLLBACK')
+            except Exception:
+                pass
+            raise
+    else:
+        for s in stmts:
+            if not s.strip():
+                continue
+            cursor.execute(s)
 
 
 def split_sql_statements(sql_text):
@@ -91,11 +108,42 @@ def split_sql_statements(sql_text):
     in_dquote = False
     in_dollar = False
     dollar_tag = None
+    in_line_comment = False
+    in_block_comment = False
     i = 0
     L = len(sql_text)
     while i < L:
         ch = sql_text[i]
-        # handle entering/exiting dollar-quote blocks like $$...$$ or $tag$...$tag$
+
+        # handle end of line comment
+        if in_line_comment:
+            if ch == '\n':
+                in_line_comment = False
+                cur.append(ch)
+            i += 1
+            continue
+
+        # handle end of block comment
+        if in_block_comment:
+            if ch == '*' and i + 1 < L and sql_text[i+1] == '/':
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+
+        # handle entering comments when not inside quotes/dollar
+        if not in_squote and not in_dquote and not in_dollar:
+            if ch == '-' and i + 1 < L and sql_text[i+1] == '-':
+                in_line_comment = True
+                i += 2
+                continue
+            if ch == '/' and i + 1 < L and sql_text[i+1] == '*':
+                in_block_comment = True
+                i += 2
+                continue
+
+        # handle dollar-quoted blocks
         if in_dollar:
             if sql_text.startswith(dollar_tag, i):
                 cur.append(dollar_tag)
@@ -114,7 +162,6 @@ def split_sql_statements(sql_text):
             while j < L and (sql_text[j].isalnum() or sql_text[j] == '_'):
                 j += 1
             if j < L and sql_text[j] == '$':
-                # found a tag like $tag$
                 dollar_tag = sql_text[i:j+1]
                 cur.append(dollar_tag)
                 i = j + 1
@@ -133,7 +180,7 @@ def split_sql_statements(sql_text):
             i += 1
             continue
 
-        if ch == ';' and not in_squote and not in_dquote and not in_dollar:
+        if ch == ';' and not in_squote and not in_dquote and not in_dollar and not in_line_comment and not in_block_comment:
             stmt = ''.join(cur).strip()
             if stmt:
                 statements.append(stmt)
@@ -147,7 +194,36 @@ def split_sql_statements(sql_text):
     last = ''.join(cur).strip()
     if last:
         statements.append(last)
+
+    # if any context is left open, raise a parse error
+    if in_squote or in_dquote or in_dollar or in_block_comment:
+        raise ValueError('Unterminated quote/dollar-quote or block comment detected')
     return statements
+
+
+def preflight_validate_paths(paths):
+    results = []
+    for p in paths:
+        try:
+            with open(p, 'r') as f:
+                txt = f.read()
+            stmts = split_sql_statements(txt)
+            results.append((p, 'ok', len(stmts)))
+        except Exception as e:
+            results.append((p, 'error', str(e)))
+    return results
+
+
+def is_dml_only(statements):
+    dml_prefixes = ('INSERT', 'UPDATE', 'DELETE', 'MERGE')
+    for s in statements:
+        ss = s.lstrip().upper()
+        if not ss:
+            continue
+        # if it starts with a DML verb, continue; otherwise it's not DML-only
+        if not ss.startswith(dml_prefixes):
+            return False
+    return True
 
 
 def ensure_migration_tables(cursor, database, schema, logfile):
@@ -248,7 +324,7 @@ def subcommand_deploy(args):
                 continue
             log_event(logfile, 'info', 'apply_ddl_start', file=f)
             try:
-                apply_file(cur, f, dry_run=args.dry_run)
+                apply_file(cur, f, dry_run=args.dry_run, atomic_override=getattr(args, 'atomic_files', False))
                 if cur:
                     cur.execute(f"INSERT INTO {migrations_table} (filename, checksum, applied_at, status) VALUES (%s, %s, current_timestamp(), 'success')", (os.path.basename(f), checksum))
                 log_event(logfile, 'info', 'apply_ddl_end', file=f, checksum=checksum)
@@ -265,7 +341,7 @@ def subcommand_deploy(args):
                 continue
             log_event(logfile, 'info', 'apply_dml_start', file=f)
             try:
-                apply_file(cur, f, dry_run=args.dry_run)
+                apply_file(cur, f, dry_run=args.dry_run, atomic_override=getattr(args, 'atomic_files', False))
                 if cur:
                     cur.execute(f"INSERT INTO {migrations_table} (filename, checksum, applied_at, status) VALUES (%s, %s, current_timestamp(), 'success')", (os.path.basename(f), checksum))
                 log_event(logfile, 'info', 'apply_dml_end', file=f, checksum=checksum)
@@ -307,7 +383,7 @@ def subcommand_rollback(args):
             return
         for f in files:
             log_event(logfile, 'info', 'apply_rollback_start', file=f)
-            apply_file(cur, f, dry_run=args.dry_run)
+            apply_file(cur, f, dry_run=args.dry_run, atomic_override=getattr(args, 'atomic_files', False))
             log_event(logfile, 'info', 'apply_rollback_end', file=f)
         log_event(logfile, 'info', 'rollback_complete', env=args.env)
     finally:
@@ -364,12 +440,14 @@ def main():
     d = sub.add_parser('deploy', help='Apply migrations')
     d.add_argument('env', nargs='?', default='dev')
     d.add_argument('--dry-run', action='store_true')
+    d.add_argument('--atomic-files', action='store_true', help='Run each migration file atomically (wrap in transaction)')
     d.set_defaults(func=subcommand_deploy)
 
     r = sub.add_parser('rollback', help='Run rollback scripts')
     r.add_argument('env')
     r.add_argument('target', nargs='?', help='target version substring to match', default=None)
     r.add_argument('--dry-run', action='store_true')
+    r.add_argument('--atomic-files', action='store_true', help='Run each rollback file atomically (wrap in transaction)')
     r.set_defaults(func=subcommand_rollback)
 
     v = sub.add_parser('validate', help='Validate schema connectivity')
@@ -384,11 +462,38 @@ def main():
     g.add_argument('--type', choices=['ddl', 'dml', 'rollback'], default='ddl')
     g.set_defaults(func=subcommand_generate)
 
+    pflight = sub.add_parser('preflight', help='Parse all migrations and report parsing errors')
+    pflight.add_argument('--dirs', nargs='*', default=['migrations/ddl', 'migrations/dml', 'migrations/rollback'], help='Directories to scan')
+    pflight.set_defaults(func=lambda args: subcommand_preflight(args))
+
     args = p.parse_args()
     if not args.cmd:
         p.print_help()
         sys.exit(1)
     args.func(args)
+
+
+def subcommand_preflight(args):
+    dirs = args.dirs
+    files = []
+    for d in dirs:
+        if os.path.isdir(d):
+            for root, _dirs, fnames in os.walk(d):
+                for fn in fnames:
+                    if fn.lower().endswith('.sql'):
+                        files.append(os.path.join(root, fn))
+    results = preflight_validate_paths(files)
+    has_error = False
+    for p, status, info in results:
+        if status == 'ok':
+            print(f'OK: {p} -> {info} statements')
+        else:
+            print(f'ERROR: {p} -> {info}')
+            has_error = True
+    if has_error:
+        print('Preflight found errors')
+        sys.exit(2)
+    print('Preflight passed')
 
 
 if __name__ == '__main__':
