@@ -3,3 +3,4 @@ database: UAT_DB
 schema: PUBLIC
 warehouse: ${SNOWFLAKE_WAREHOUSE}
 role: ${SNOWFLAKE_ROLE}
+environment: uat

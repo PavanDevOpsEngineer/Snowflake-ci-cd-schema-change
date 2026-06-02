@@ -3,3 +3,4 @@ database: PROD_DB
 schema: PUBLIC
 warehouse: ${SNOWFLAKE_WAREHOUSE}
 role: ${SNOWFLAKE_ROLE}
+environment: prod

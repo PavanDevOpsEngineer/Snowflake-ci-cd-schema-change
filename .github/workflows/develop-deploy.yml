@@ -1,13 +1,15 @@
 name: Develop Deploy (QA)
 
 on:
-  push:
+  pull_request:
     branches:
       - 'develop'
+  workflow_dispatch: {}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: qa
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -28,6 +30,19 @@ jobs:
       - name: Sanity check Python scripts
         run: |
           python3 -m py_compile scripts/*.py
+      - name: Verify secrets available
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+          SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+          SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+        run: |
+          python3 scripts/test_secrets.py
+      - name: Replace <env> placeholders (qa)
+        run: |
+          echo "Replacing <env> with qa in migrations/ddl and migrations/dml SQL files"
+          find migrations/ddl migrations/dml -type f -name '*.sql' -print0 | xargs -0 sed -i 's|<env>|qa|g' || true
       - name: Run deploy script (QA)
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
