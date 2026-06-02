@@ -1,6 +1,13 @@
 name: Rollback
 
 on:
+  pull_request:
+    branches:
+      - 'main'
+      - 'develop'
+      - 'release/**'
+      - 'hotfix/**'
+      - 'feature/**'
   workflow_dispatch:
     inputs:
       environment:

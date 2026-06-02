@@ -1,7 +1,7 @@
 name: Hotfix Deploy (PROD Hotfix)
 
 on:
-  push:
+  pull_request:
     branches:
       - 'hotfix/**'
   workflow_dispatch: {}
