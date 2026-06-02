@@ -1,12 +1,24 @@
 
 # Snowflake CI/CD Schema Change
 
-This repository implements a GitFlow-style CI/CD pipeline for Snowflake schema changes (DDL + DML) across DEV → QA → PROD.
+This repository implements a Snowflake migration CI/CD pipeline using GitHub Actions and a Python-driven deploy tool. It applies DDL and DML migrations, tracks migration history, and protects deployments with environment-specific workflows.
 
-Key points
-- Workflows: `.github/workflows/*` (feature/develop/main/hotfix/rollback)
-- All deploy/rollback/validate/generate functionality is provided by `scripts/deploy.py` (Python + Snowflake connector)
-- Additional convenience scripts: `scripts/generate_migration.py`, `scripts/validate_workflows.py`.
+Key features
+- GitHub Actions workflows for each environment:
+  - `feature-deploy.yml`: DEV deploys on `feature/**` pushes when `migrations/ddl/**` or `migrations/dml/**` change.
+  - `develop-deploy.yml`: QA deploys on PRs targeting `develop`, with migration path filters.
+  - `main-deploy.yml`: PROD deploys on PRs targeting `main`, with migration path filters.
+  - `hotfix-deploy.yml`: hotfix deployments on PRs targeting `hotfix/**`.
+- `scripts/deploy.py` is the canonical CLI for applying migrations and includes:
+  - `deploy` to apply migrations
+  - `rollback` to apply rollback SQL
+  - `validate` to verify schema connectivity
+  - `generate` to scaffold migration files
+  - `preflight` to parse SQL and catch syntax issues early
+- Migration tracking and locking inside Snowflake via `schema_migrations` and a lock table.
+- `<env>` placeholder replacement in SQL migration files for environment-specific object names.
+- Environment config files in `config/<env>.yml` for Snowflake connection settings.
+- Built with `snowflake-connector-python` and `PyYAML`.
 
 Quick start
 
@@ -26,69 +38,67 @@ SNOWFLAKE_ROLE
 ```bash
 SNOWFLAKE_ACCOUNT=your-account SNOWFLAKE_USER=ci_user SNOWFLAKE_PASSWORD=secret python3 scripts/deploy.py deploy dev --dry-run
 ```
-4. Apply migrations:
+4. Apply migrations to `dev`:
 ```bash
 SNOWFLAKE_ACCOUNT=your-account SNOWFLAKE_USER=ci_user SNOWFLAKE_PASSWORD=secret SNOWFLAKE_WAREHOUSE=DEV_WH SNOWFLAKE_ROLE=CI_ROLE python3 scripts/deploy.py deploy dev
 ```
 
-- Other commands
+Core commands
+- Deploy: `python3 scripts/deploy.py deploy <env>`
 - Rollback: `python3 scripts/deploy.py rollback <env> [target]`
-- Validate connectivity/tables: `python3 scripts/deploy.py validate <env>`
+- Validate: `python3 scripts/deploy.py validate <env> [--tables ...]`
 - Generate migration: `python3 scripts/deploy.py generate v1.2.0 "add_table" --type ddl`
+- Preflight: `python3 scripts/deploy.py preflight`
+- Workflow validation: `python3 scripts/validate_workflows.py`
+- Secret verification: `python3 scripts/test_secrets.py`
 
-CI notes
-- Workflows install Python 3.11, cache pip, and install `requirements.txt` before running scripts.
-CI details
-- Workflows are pinned to **Python 3.11** and cache pip based on `requirements.txt` to speed installs.
-- Linting for GitHub workflows uses `rhysd/actionlint@v1` (semantic checks for Actions) with a Python YAML fallback.
-- After each deploy/rollback run the workflows upload structured JSON logs from `artifacts/*.log` so you can download and inspect run details.
+How the CI flow works
 
-Workflow flow
+- `feature/**` pushes trigger the DEV workflow and deploy only when migration files change.
+- PRs targeting `develop` run the QA preflight checks and the actual deployment executes only after the PR is merged into `develop`.
+- PRs targeting `main` run the PROD preflight checks and the actual deployment executes only after the PR is merged into `main`.
+- Hotfix PRs target `hotfix/**` and deploy only after merge.
 
-- Clone the repository and create a feature branch. Pushing a feature branch triggers the DEV deploy workflow:
+Merge policy
 
-```bash
-git clone git@github.com:your-org/Snowflake-ci-cd-schema-change.git
-cd Snowflake-ci-cd-schema-change
-git checkout -b feature/my-feature
-# make changes to migrations or code
-git push -u origin feature/my-feature
-```
+- Use **Merge Commit** as the merge strategy for `develop`, `main`, and `hotfix` PRs.
+- This preserves the merge history and enables the workflow logic to detect merged PRs cleanly.
+- Avoid squash or rebase merges for release-related branches, because this flow depends on merge commits and branch-level path filters.
 
-- Open a Pull Request from `feature/*` into `develop` to trigger the QA deploy workflow. This PR-based flow ensures CI runs and preflight validation before promoting to QA.
+Workflow implementation details
 
-- When QA work is complete, open a Pull Request from `develop` into `main` to trigger the PROD deploy workflow. Protect `main` with approvals and required checks as appropriate.
+- Each workflow checks out code, installs Python 3.11, caches pip dependencies, validates Python scripts, verifies Snowflake secrets, replaces `<env>` placeholders in SQL files, then runs `scripts/deploy.py deploy <env>`.
+- Workflows upload JSON-lines logs from `artifacts/*.log` so run details are available for inspection.
+- `scripts/test_secrets.py` ensures Snowflake credentials are present before deployment.
 
-Notes
-- All deploy/rollback runs perform a `preflight` parse of `migrations/ddl` and `migrations/dml` to validate SQL before applying changes.
-- Use `python3 scripts/deploy.py preflight` locally to verify migration files before pushing.
+Migration structure
 
-Merge / Push behavior
+- `migrations/ddl/`: schema changes and SQL objects
+- `migrations/dml/`: reference data and seed data
+- `migrations/rollback/`: rollback scripts for revert operations
 
-- When a Pull Request is merged, the merge commit (a push to the target branch) will also trigger the corresponding deploy workflow. To avoid unnecessary deploys, the workflows are configured to run on pushes only when files under `migrations/ddl/**` or `migrations/dml/**` changed.
+Project structure
 
-Concurrency
+- `scripts/`: deployment tools and helpers. Contains the central deploy CLI (`deploy.py`), migration scaffolding (`generate_migration.py`), workflow validation (`validate_workflows.py`), secret checking (`test_secrets.py`), and backward-compatible wrappers like `rollback.py`.
+- `migrations/ddl/`: DDL migration files for schema changes, stored procedures, functions, and object creation. Files in this directory use `<env>` placeholders that are replaced at deploy time.
+- `migrations/dml/`: DML migration files for reference data, seed records, and environment-specific inserts or updates.
+- `migrations/rollback/`: rollback scripts that reverse applied migrations; used by `scripts/deploy.py rollback`.
+- `config/`: environment-specific Snowflake configuration files (`dev.yml`, `qa.yml`, `prod.yml`) that define connection settings, database, and schema defaults.
+- `.github/workflows/`: GitHub Actions workflows that run environment deploys, apply path filters, and serialize runs by environment using concurrency groups.
+- `artifacts/`: structured JSON log output from deployment runs. These logs are uploaded as workflow artifacts for auditing and debugging.
+- `docs/`: operational documentation, branching strategy, and deployment guidance.
+- `requirements.txt`: Python dependency manifest used by CI and local execution.
 
-- Deploy workflows are serialized per environment using GitHub Actions `concurrency` groups. The groups are:
-	- `deploy-dev` for DEV
-	- `deploy-qa` for QA
-	- `deploy-prod` for PROD (also used by hotfixes)
+How deployments are protected
 
-- Runs are queued and allowed to complete; in-progress runs are not canceled by newer runs. This ensures only one active deploy per environment at a time and avoids concurrent schema changes.
+- The deploy tool records applied migration checksums in Snowflake and skips already-applied files.
+- A Snowflake lock table prevents concurrent deploy runs from colliding.
+- Workflows are scoped to migration path changes so unrelated PRs do not trigger deployments.
 
-Notes on scripts
-- `scripts/deploy.py` is the canonical tool (subcommands: `deploy`, `rollback`, `validate`, `generate`).
-	(Thin wrapper scripts have been removed; use `deploy.py` directly.)
+Additional notes
 
-Logging & observability
-- Deploy and rollback commands emit JSON-lines structured logs into `artifacts/` (uploaded as workflow artifacts). Fields include timestamps, event types, file names, and query results for validation steps.
+- `scripts/deploy.py` uses a robust SQL splitter that correctly handles single quotes, double quotes, dollar-quoted blocks, and comments.
+- `scripts/generate_migration.py` creates skeletal migration files in the appropriate directory.
+- `scripts/rollback.py` is a thin wrapper that delegates rollback work to `scripts/deploy.py`.
 
-Security & secrets
-- Store credentials as GitHub secrets (`SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD` or key material, `SNOWFLAKE_WAREHOUSE`, `SNOWFLAKE_ROLE`).
-
-Recommended next steps
-- Implement a `schema_migrations` history table and a deploy lock to avoid concurrent runs and to make migrations idempotent.
-- Add key-pair auth support for `deploy.py` if you prefer private-key over passwords.
-- Linting for GitHub workflows runs via `scripts/validate_workflows.py`.
-
-See `docs/` for more details.
+See `docs/` for more details on branching strategy, deployment guidance, and rollback procedures.

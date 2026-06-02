@@ -2,11 +2,13 @@ name: Main Deploy (PROD)
 
 on:
   pull_request:
+    types: [closed]
     branches:
       - 'main'
     paths:
       - 'migrations/ddl/**'
       - 'migrations/dml/**'
+  workflow_dispatch: {}
 
 concurrency:
   group: deploy-prod
@@ -15,6 +17,7 @@ concurrency:
 
 jobs:
   deploy:
+    if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     environment: prod
     steps:
