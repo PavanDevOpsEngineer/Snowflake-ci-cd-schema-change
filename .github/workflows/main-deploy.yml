@@ -4,7 +4,14 @@ on:
   pull_request:
     branches:
       - 'main'
-  workflow_dispatch: {}
+    paths:
+      - 'migrations/ddl/**'
+      - 'migrations/dml/**'
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
 
 jobs:
   deploy:

@@ -4,6 +4,14 @@ on:
   push:
     branches:
       - 'feature/**'
+    paths:
+      - 'migrations/ddl/**'
+      - 'migrations/dml/**'
+      
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
 
 jobs:
   deploy:
