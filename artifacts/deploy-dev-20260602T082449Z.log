@@ -1,0 +1,10 @@
+{"ts": "2026-06-02T08:24:49.548359Z", "level": "info", "message": "dry_run", "env": "dev"}
+{"ts": "2026-06-02T08:24:49.548525Z", "level": "info", "message": "start_deploy", "env": "dev", "owner": "local-6532-2026-06-02T08:24:49.548522"}
+{"ts": "2026-06-02T08:24:49.548798Z", "level": "info", "message": "apply_ddl_start", "file": "migrations/ddl/v1.0.0__create_initial_schema.sql"}
+{"ts": "2026-06-02T08:24:49.548860Z", "level": "info", "message": "apply_ddl_end", "file": "migrations/ddl/v1.0.0__create_initial_schema.sql", "checksum": "f81dac001588d75525a42f7a65354babc8a4927fb5ba54abd506c2f817269054"}
+{"ts": "2026-06-02T08:24:49.549051Z", "level": "info", "message": "apply_ddl_start", "file": "migrations/ddl/v1.0.1__add_user_table.sql"}
+{"ts": "2026-06-02T08:24:49.549102Z", "level": "info", "message": "apply_ddl_end", "file": "migrations/ddl/v1.0.1__add_user_table.sql", "checksum": "5442044e02ab2ac730003495afb5f6ec3382e3329ebedb45d47034947ced3792"}
+{"ts": "2026-06-02T08:24:49.549641Z", "level": "info", "message": "apply_dml_start", "file": "migrations/dml/v1.0.0__insert_reference_data.sql"}
+{"ts": "2026-06-02T08:24:49.549731Z", "level": "info", "message": "apply_dml_end", "file": "migrations/dml/v1.0.0__insert_reference_data.sql", "checksum": "c402acb5d1ee018fd20b18bed8f6409bd723900058c13241576bf14d16adb04a"}
+{"ts": "2026-06-02T08:24:49.549766Z", "level": "info", "message": "migrations_processed", "env": "dev"}
+{"ts": "2026-06-02T08:24:49.549798Z", "level": "info", "message": "connection_closed", "env": "dev"}
