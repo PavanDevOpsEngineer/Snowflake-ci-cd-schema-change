@@ -5,3 +5,4 @@ CREATE TABLE IF NOT EXISTS <env>_db.PUBLIC.users_test (
     email VARCHAR(100) NOT NULL,
     created_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
+
