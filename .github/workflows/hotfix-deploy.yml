@@ -4,7 +4,14 @@ on:
   pull_request:
     branches:
       - 'hotfix/**'
+    paths:
+      - 'migrations/ddl/**'
+      - 'migrations/dml/**'
   workflow_dispatch: {}
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
 
 jobs:
   deploy:
