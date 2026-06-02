@@ -38,6 +38,10 @@ jobs:
           SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
         run: |
           python3 scripts/test_secrets.py
+      - name: Replace <env> placeholders (dev)
+        run: |
+          echo "Replacing <env> with dev in migrations/ddl and migrations/dml SQL files"
+          find migrations/ddl migrations/dml -type f -name '*.sql' -print0 | xargs -0 sed -i 's|<env>|dev|g' || true
       - name: Run deploy script (DEV)
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}

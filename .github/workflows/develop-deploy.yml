@@ -38,6 +38,10 @@ jobs:
           SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
         run: |
           python3 scripts/test_secrets.py
+      - name: Replace <env> placeholders (qa)
+        run: |
+          echo "Replacing <env> with qa in migrations/ddl and migrations/dml SQL files"
+          find migrations/ddl migrations/dml -type f -name '*.sql' -print0 | xargs -0 sed -i 's|<env>|qa|g' || true
       - name: Run deploy script (QA)
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}

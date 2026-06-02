@@ -42,6 +42,11 @@ jobs:
           SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
         run: |
           python3 scripts/test_secrets.py
+      - name: Replace <env> placeholders (input)
+        run: |
+          ENV_INPUT="${{ github.event.inputs.environment }}"
+          echo "Replacing <env> with ${ENV_INPUT} in migrations/ddl and migrations/dml SQL files"
+          find migrations/ddl migrations/dml -type f -name '*.sql' -print0 | xargs -0 -I{} bash -c "sed -i 's|<env>|${ENV_INPUT}|g' '{}'" || true
       - name: Run rollback script
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}

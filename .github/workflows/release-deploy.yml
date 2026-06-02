@@ -39,6 +39,15 @@ jobs:
           SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
         run: |
           python3 scripts/test_secrets.py
+      - name: Replace <env> placeholders (uat)
+        run: |
+          echo "Replacing <env> with uat in migrations/ddl and migrations/dml SQL files"
+          find migrations/ddl migrations/dml -type f -name '*.sql' -print0 | xargs -0 sed -i 's|<env>|uat|g' || true
+      - name: Replace <env> placeholders (uat)
+        run: |
+          echo "Replacing <env> with uat in SQL files"
+          find migrations -type f -name '*.sql' -print0 | xargs -0 sed -i 's|<env>|uat|g' || true
+          if [ -f scripts/provision_snowflake.sql ]; then sed -i 's|<env>|uat|g' scripts/provision_snowflake.sql || true; fi
       - name: Run deploy script (UAT)
         env:
           SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}

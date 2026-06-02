@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Deploy tool using Snowflake Python connector.
+"""Deploy tool for Snowflake migrations.
 
-Subcommands: deploy, rollback, validate, generate
+Usage: scripts/deploy.py deploy|rollback|validate|generate <env>
 
-Features:
-- Applies migrations from migrations/ddl then migrations/dml
-- Records applied migrations in a `schema_migrations` table
-- Attempts a simple lock via `schema_migration_lock` table to prevent concurrent runs
-- Emits JSON-lines logs to `artifacts/` and prints them to stdout
+This script reads config/<env>.yml for connection defaults and applies SQL
+files from migrations/ddl and migrations/dml. It records applied migrations in
+<database>.<schema>.schema_migrations and uses a simple lock table to prevent
+concurrent runs.
 """
 import os
 import sys
@@ -48,16 +47,13 @@ def load_config(env):
     if not os.path.exists(path):
         raise FileNotFoundError(f'Config file not found: {path}')
     with open(path) as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(f) or {}
 
 
 def compute_checksum(path):
     h = hashlib.sha256()
     with open(path, 'rb') as f:
-        while True:
-            chunk = f.read(8192)
-            if not chunk:
-                break
+        for chunk in iter(lambda: f.read(8192), b''):
             h.update(chunk)
     return h.hexdigest()
 
@@ -72,101 +68,179 @@ def apply_file(cursor, path, dry_run=False):
     print(f'-- Applying: {path}')
     with open(path, 'r') as f:
         sql = f.read()
+    # split into statements and execute each separately to handle multi-statement files
+    stmts = split_sql_statements(sql)
     if dry_run:
-        print(sql)
+        for s in stmts:
+            print(s)
         return
-    # Execute the file content; Snowflake will execute statements.
-    try:
-        cursor.execute(sql)
-    except Exception:
-        print(f'Error applying {path}', file=sys.stderr)
-        raise
+    for s in stmts:
+        if not s.strip():
+            continue
+        cursor.execute(s)
 
 
-def ensure_migration_tables(cur, db, schema, logfile):
-    migrations_table = f"{db}.{schema}.schema_migrations"
-    lock_table = f"{db}.{schema}.schema_migration_lock"
-    # Create tables if they don't exist
-    cur.execute(f"CREATE TABLE IF NOT EXISTS {migrations_table} (filename VARCHAR, checksum VARCHAR, applied_at TIMESTAMP_LTZ, status VARCHAR, note VARCHAR)")
-    cur.execute(f"CREATE TABLE IF NOT EXISTS {lock_table} (lock_name VARCHAR, owner VARCHAR, acquired_at TIMESTAMP_LTZ)")
+def split_sql_statements(sql_text):
+    """Split SQL text into statements by semicolon, ignoring semicolons inside
+    single/double quotes or dollar-quoted blocks (e.g. $$...$$ or $tag$...$tag$).
+    Returns a list of statement strings without trailing semicolons.
+    """
+    statements = []
+    cur = []
+    in_squote = False
+    in_dquote = False
+    in_dollar = False
+    dollar_tag = None
+    i = 0
+    L = len(sql_text)
+    while i < L:
+        ch = sql_text[i]
+        # handle entering/exiting dollar-quote blocks like $$...$$ or $tag$...$tag$
+        if in_dollar:
+            if sql_text.startswith(dollar_tag, i):
+                cur.append(dollar_tag)
+                i += len(dollar_tag)
+                in_dollar = False
+                dollar_tag = None
+                continue
+            else:
+                cur.append(ch)
+                i += 1
+                continue
+
+        if ch == '$' and not in_squote and not in_dquote:
+            # try to read a dollar tag
+            j = i + 1
+            while j < L and (sql_text[j].isalnum() or sql_text[j] == '_'):
+                j += 1
+            if j < L and sql_text[j] == '$':
+                # found a tag like $tag$
+                dollar_tag = sql_text[i:j+1]
+                cur.append(dollar_tag)
+                i = j + 1
+                in_dollar = True
+                continue
+
+        if ch == "'" and not in_dquote:
+            in_squote = not in_squote
+            cur.append(ch)
+            i += 1
+            continue
+
+        if ch == '"' and not in_squote:
+            in_dquote = not in_dquote
+            cur.append(ch)
+            i += 1
+            continue
+
+        if ch == ';' and not in_squote and not in_dquote and not in_dollar:
+            stmt = ''.join(cur).strip()
+            if stmt:
+                statements.append(stmt)
+            cur = []
+            i += 1
+            continue
+
+        cur.append(ch)
+        i += 1
+
+    last = ''.join(cur).strip()
+    if last:
+        statements.append(last)
+    return statements
+
+
+def ensure_migration_tables(cursor, database, schema, logfile):
+    migrations_table = f"{database}.{schema}.schema_migrations"
+    lock_table = f"{database}.{schema}.schema_migration_lock"
+    cursor.execute(f"CREATE TABLE IF NOT EXISTS {migrations_table} (filename VARCHAR, checksum VARCHAR, applied_at TIMESTAMP_LTZ, status VARCHAR, note VARCHAR)")
+    cursor.execute(f"CREATE TABLE IF NOT EXISTS {lock_table} (lock_name VARCHAR, owner VARCHAR, acquired_at TIMESTAMP_LTZ)")
     log_event(logfile, 'info', 'ensure_migration_tables', migrations_table=migrations_table, lock_table=lock_table)
     return migrations_table, lock_table
 
 
-def acquire_lock(cur, lock_table, owner, logfile):
-    # Check existing lock
-    cur.execute(f"SELECT owner, acquired_at FROM {lock_table} WHERE lock_name='deploy_lock'")
-    rows = cur.fetchall()
+def acquire_lock(cursor, lock_table, owner, logfile):
+    cursor.execute(f"SELECT owner FROM {lock_table} WHERE lock_name='deploy_lock'")
+    rows = cursor.fetchall()
     if rows:
-        existing_owner = rows[0][0]
-        log_event(logfile, 'error', 'lock_exists', owner=existing_owner)
-        raise RuntimeError(f"Deploy lock already held by {existing_owner}")
-    # Acquire lock by inserting row
-    cur.execute(f"INSERT INTO {lock_table} (lock_name, owner, acquired_at) VALUES ('deploy_lock', %s, current_timestamp())", (owner,))
+        existing = rows[0][0]
+        log_event(logfile, 'error', 'lock_exists', owner=existing)
+        raise RuntimeError(f"Deploy lock already held by {existing}")
+    cursor.execute(f"INSERT INTO {lock_table} (lock_name, owner, acquired_at) VALUES ('deploy_lock', %s, current_timestamp())", (owner,))
     log_event(logfile, 'info', 'lock_acquired', owner=owner)
 
 
-def release_lock(cur, lock_table, owner, logfile):
-    cur.execute(f"DELETE FROM {lock_table} WHERE lock_name='deploy_lock' AND owner=%s", (owner,))
+def release_lock(cursor, lock_table, owner, logfile):
+    cursor.execute(f"DELETE FROM {lock_table} WHERE lock_name='deploy_lock' AND owner=%s", (owner,))
     log_event(logfile, 'info', 'lock_released', owner=owner)
 
 
-def get_applied_checksums(cur, migrations_table):
-    cur.execute(f"SELECT checksum FROM {migrations_table} WHERE status='success'")
-    rows = cur.fetchall()
+def get_applied_checksums(cursor, migrations_table):
+    cursor.execute(f"SELECT checksum FROM {migrations_table} WHERE status='success'")
+    rows = cursor.fetchall()
     return set(r[0] for r in rows if r and r[0])
+
+
+def connect(cfg, logfile, require_auth=True):
+    account = os.environ.get('SNOWFLAKE_ACCOUNT') or cfg.get('account')
+    user = os.environ.get('SNOWFLAKE_USER') or cfg.get('user')
+    password = os.environ.get('SNOWFLAKE_PASSWORD') or cfg.get('password')
+    warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE') or cfg.get('warehouse')
+    role = os.environ.get('SNOWFLAKE_ROLE') or cfg.get('role')
+
+    if require_auth and (not account or not user or (not password and 'SNOWFLAKE_PRIVATE_KEY' not in os.environ)):
+        raise RuntimeError('Missing Snowflake credentials. Set SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER and SNOWFLAKE_PASSWORD or private key.')
+
+    conn_kwargs = dict(account=account, user=user)
+    if password:
+        conn_kwargs['password'] = password
+    if warehouse:
+        conn_kwargs['warehouse'] = warehouse
+    if role:
+        conn_kwargs['role'] = role
+    if cfg.get('database'):
+        conn_kwargs['database'] = cfg.get('database')
+    if cfg.get('schema'):
+        conn_kwargs['schema'] = cfg.get('schema')
+
+    # allow callers to skip auth (dry-run) by setting require_auth=False
+    if not require_auth:
+        return None, None
+
+    conn = snowflake.connector.connect(**conn_kwargs)
+    cur = conn.cursor()
+    # set session context explicitly to avoid unqualified object errors
+    try:
+        if cfg.get('database'):
+            cur.execute(f"USE DATABASE {cfg.get('database')}")
+        if cfg.get('schema'):
+            cur.execute(f"USE SCHEMA {cfg.get('schema')}")
+    except Exception:
+        pass
+    log_event(logfile, 'info', 'connected', account=account, user=user)
+    return conn, cur
 
 
 def subcommand_deploy(args):
     cfg = load_config(args.env)
     logfile = init_logger(args.env)
+    log_event(logfile, 'info', 'start_deploy', env=args.env)
 
-    account = os.environ.get('SNOWFLAKE_ACCOUNT') or cfg.get('account')
-    user = os.environ.get('SNOWFLAKE_USER')
-    password = os.environ.get('SNOWFLAKE_PASSWORD')
-    warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE') or cfg.get('warehouse')
-    role = os.environ.get('SNOWFLAKE_ROLE') or cfg.get('role')
-
-    # Allow dry-run to operate without credentials
-    if not args.dry_run:
-        if not account or not user or (not password and 'SNOWFLAKE_PRIVATE_KEY' not in os.environ):
-            print('Missing Snowflake credentials. Set SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER and SNOWFLAKE_PASSWORD or private key.', file=sys.stderr)
-            sys.exit(2)
-
-    if args.dry_run:
-        print('Running in dry-run mode; SQL will be printed but not executed.')
-        log_event(logfile, 'info', 'dry_run', env=args.env)
-
-    conn_kwargs = dict(account=account, user=user, warehouse=warehouse, role=role)
-    if password:
-        conn_kwargs['password'] = password
-
-    # Note: key-pair auth not implemented in this script; can be added if needed.
-
-    if not args.dry_run:
-        conn = snowflake.connector.connect(**conn_kwargs)
-        cur = conn.cursor()
-    else:
-        conn = None
-        cur = None
+    # allow dry-run without credentials
+    require_auth = not args.dry_run
+    conn, cur = (None, None)
+    if require_auth:
+        conn, cur = connect(cfg, logfile, require_auth=True)
 
     owner = f"{os.environ.get('GITHUB_RUN_ID','local')}-{os.getpid()}-{datetime.utcnow().isoformat()}"
-    migrations_table = None
-    lock_table = None
     try:
-        log_event(logfile, 'info', 'start_deploy', env=args.env, owner=owner)
-        # Ensure migration tables exist and acquire lock
-        if not args.dry_run:
-            db = cfg.get('database')
-            schema = cfg.get('schema', 'PUBLIC')
-            migrations_table, lock_table = ensure_migration_tables(cur, db, schema, logfile)
+        if cur:
+            migrations_table, lock_table = ensure_migration_tables(cur, cfg.get('database'), cfg.get('schema', 'PUBLIC'), logfile)
             acquire_lock(cur, lock_table, owner, logfile)
-
             applied = get_applied_checksums(cur, migrations_table)
         else:
             applied = set()
 
-        # Apply DDL then DML only if checksum not applied
         for f in gather_migrations('ddl'):
             checksum = compute_checksum(f)
             if checksum in applied:
@@ -175,11 +249,11 @@ def subcommand_deploy(args):
             log_event(logfile, 'info', 'apply_ddl_start', file=f)
             try:
                 apply_file(cur, f, dry_run=args.dry_run)
-                if not args.dry_run:
+                if cur:
                     cur.execute(f"INSERT INTO {migrations_table} (filename, checksum, applied_at, status) VALUES (%s, %s, current_timestamp(), 'success')", (os.path.basename(f), checksum))
                 log_event(logfile, 'info', 'apply_ddl_end', file=f, checksum=checksum)
             except Exception as e:
-                if not args.dry_run:
+                if cur:
                     cur.execute(f"INSERT INTO {migrations_table} (filename, checksum, applied_at, status, note) VALUES (%s, %s, current_timestamp(), 'failed', %s)", (os.path.basename(f), checksum, str(e)))
                 log_event(logfile, 'error', 'apply_ddl_failed', file=f, error=str(e))
                 raise
@@ -192,11 +266,11 @@ def subcommand_deploy(args):
             log_event(logfile, 'info', 'apply_dml_start', file=f)
             try:
                 apply_file(cur, f, dry_run=args.dry_run)
-                if not args.dry_run:
+                if cur:
                     cur.execute(f"INSERT INTO {migrations_table} (filename, checksum, applied_at, status) VALUES (%s, %s, current_timestamp(), 'success')", (os.path.basename(f), checksum))
                 log_event(logfile, 'info', 'apply_dml_end', file=f, checksum=checksum)
             except Exception as e:
-                if not args.dry_run:
+                if cur:
                     cur.execute(f"INSERT INTO {migrations_table} (filename, checksum, applied_at, status, note) VALUES (%s, %s, current_timestamp(), 'failed', %s)", (os.path.basename(f), checksum, str(e)))
                 log_event(logfile, 'error', 'apply_dml_failed', file=f, error=str(e))
                 raise
@@ -204,12 +278,11 @@ def subcommand_deploy(args):
         log_event(logfile, 'info', 'migrations_processed', env=args.env)
         print('Migrations processed.')
     finally:
-        # release lock if held
         if cur and lock_table and owner:
             try:
                 release_lock(cur, lock_table, owner, logfile)
-            except Exception as e:
-                log_event(logfile, 'warn', 'release_lock_failed', error=str(e))
+            except Exception:
+                pass
         if cur:
             cur.close()
         if conn:
@@ -220,42 +293,22 @@ def subcommand_deploy(args):
 def subcommand_rollback(args):
     cfg = load_config(args.env)
     logfile = init_logger(args.env)
-    account = os.environ.get('SNOWFLAKE_ACCOUNT') or cfg.get('account')
-    user = os.environ.get('SNOWFLAKE_USER')
-    password = os.environ.get('SNOWFLAKE_PASSWORD')
-    warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE') or cfg.get('warehouse')
-    role = os.environ.get('SNOWFLAKE_ROLE') or cfg.get('role')
-
-    if not account or not user or (not password and 'SNOWFLAKE_PRIVATE_KEY' not in os.environ):
-        print('Missing Snowflake credentials. Set SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER and SNOWFLAKE_PASSWORD or private key.', file=sys.stderr)
-        sys.exit(2)
-
-    conn_kwargs = dict(account=account, user=user, warehouse=warehouse, role=role)
-    if password:
-        conn_kwargs['password'] = password
-
-    if not args.dry_run:
-        conn = snowflake.connector.connect(**conn_kwargs)
-        cur = conn.cursor()
-    else:
-        conn = None
-        cur = None
+    require_auth = not args.dry_run
+    conn, cur = (None, None)
+    if require_auth:
+        conn, cur = connect(cfg, logfile, require_auth=True)
 
     try:
         files = sorted(glob.glob(os.path.join('migrations', 'rollback', '*.sql')), reverse=True)
         if args.target:
-            # filter files that include the target version string
             files = [f for f in files if args.target in os.path.basename(f)]
-
         if not files:
             print('No rollback files found for given criteria.')
             return
-
         for f in files:
             log_event(logfile, 'info', 'apply_rollback_start', file=f)
             apply_file(cur, f, dry_run=args.dry_run)
             log_event(logfile, 'info', 'apply_rollback_end', file=f)
-
         log_event(logfile, 'info', 'rollback_complete', env=args.env)
     finally:
         if cur:
@@ -267,34 +320,17 @@ def subcommand_rollback(args):
 def subcommand_validate(args):
     cfg = load_config(args.env)
     logfile = init_logger(args.env)
-    account = os.environ.get('SNOWFLAKE_ACCOUNT') or cfg.get('account')
-    user = os.environ.get('SNOWFLAKE_USER')
-    password = os.environ.get('SNOWFLAKE_PASSWORD')
-    warehouse = os.environ.get('SNOWFLAKE_WAREHOUSE') or cfg.get('warehouse')
-    role = os.environ.get('SNOWFLAKE_ROLE') or cfg.get('role')
-
-    if not account or not user or (not password and 'SNOWFLAKE_PRIVATE_KEY' not in os.environ):
-        print('Missing Snowflake credentials. Set SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER and SNOWFLAKE_PASSWORD or private key.', file=sys.stderr)
-        sys.exit(2)
-
-    conn_kwargs = dict(account=account, user=user, warehouse=warehouse, role=role)
-    if password:
-        conn_kwargs['password'] = password
-
-    if not args.dry_run:
-        conn = snowflake.connector.connect(**conn_kwargs)
-        cur = conn.cursor()
-    else:
-        conn = None
-        cur = None
-
+    require_auth = not args.dry_run
+    conn, cur = (None, None)
+    if require_auth:
+        conn, cur = connect(cfg, logfile, require_auth=True)
     try:
-        # basic validation: check tables listed
+        # basic validation: if tables provided, try desc
         for t in args.tables:
             q = f"DESC TABLE IF EXISTS {t};"
             print(q)
             log_event(logfile, 'info', 'validate_query', query=q)
-            if not args.dry_run:
+            if cur and not args.dry_run:
                 cur.execute(q)
                 for r in cur:
                     print(r)
