@@ -1,10 +1,10 @@
 
 # Snowflake CI/CD Schema Change
 
-This repository implements a GitFlow-style CI/CD pipeline for Snowflake schema changes (DDL + DML) across DEV → QA → UAT → PROD.
+This repository implements a GitFlow-style CI/CD pipeline for Snowflake schema changes (DDL + DML) across DEV → QA → PROD.
 
 Key points
-- Workflows: `.github/workflows/*` (feature/develop/release/main/hotfix/rollback)
+- Workflows: `.github/workflows/*` (feature/develop/main/hotfix/rollback)
 - All deploy/rollback/validate/generate functionality is provided by `scripts/deploy.py` (Python + Snowflake connector)
 - Additional convenience scripts: `scripts/generate_migration.py`, `scripts/validate_workflows.py`.
 
@@ -31,7 +31,7 @@ SNOWFLAKE_ACCOUNT=your-account SNOWFLAKE_USER=ci_user SNOWFLAKE_PASSWORD=secret 
 SNOWFLAKE_ACCOUNT=your-account SNOWFLAKE_USER=ci_user SNOWFLAKE_PASSWORD=secret SNOWFLAKE_WAREHOUSE=DEV_WH SNOWFLAKE_ROLE=CI_ROLE python3 scripts/deploy.py deploy dev
 ```
 
-Other commands
+- Other commands
 - Rollback: `python3 scripts/deploy.py rollback <env> [target]`
 - Validate connectivity/tables: `python3 scripts/deploy.py validate <env>`
 - Generate migration: `python3 scripts/deploy.py generate v1.2.0 "add_table" --type ddl`
@@ -45,7 +45,7 @@ CI details
 
 Notes on scripts
 - `scripts/deploy.py` is the canonical tool (subcommands: `deploy`, `rollback`, `validate`, `generate`).
-- `scripts/rollback.py` and `scripts/validate_schema.py` are thin wrappers that delegate to `deploy.py` for backward compatibility.
+	(Thin wrapper scripts have been removed; use `deploy.py` directly.)
 
 Logging & observability
 - Deploy and rollback commands emit JSON-lines structured logs into `artifacts/` (uploaded as workflow artifacts). Fields include timestamps, event types, file names, and query results for validation steps.
